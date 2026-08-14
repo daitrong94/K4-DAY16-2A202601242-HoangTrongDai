@@ -73,6 +73,34 @@ from __future__ import annotations
 from harness.middleware import Middleware
 
 
+def _doc_containing_line(ctx, text: str) -> str | None:
+    """doc_id của tài liệu có một DÒNG chứa `text` nguyên văn, hoặc None."""
+    if ctx.corpus is None:
+        return None
+    for doc in ctx.corpus.docs:
+        if any(text in line for line in doc.body.split("\n")):
+            return doc.doc_id
+    return None
+
+
+def _split_stitched(ctx, text: str):
+    """Thử tách `text` tại một dấu " và " sao cho hai nửa là chữ của hai
+    tài liệu khác nhau, cả hai đều thực sự có trong bằng chứng đã quan
+    sát. Trả về [(text1, doc_id1), (text2, doc_id2)] hoặc None."""
+    marker = " và "
+    idx = text.find(marker)
+    while idx != -1:
+        left = text[:idx].strip()
+        right = text[idx + len(marker):].strip()
+        if left and right and ctx.saw(left) and ctx.saw(right):
+            left_doc = _doc_containing_line(ctx, left)
+            right_doc = _doc_containing_line(ctx, right)
+            if left_doc and right_doc and left_doc != right_doc:
+                return [(left, left_doc), (right, right_doc)]
+        idx = text.find(marker, idx + 1)
+    return None
+
+
 class Critic(Middleware):
     """Xoá những gì bằng chứng không đỡ; abstain khi không còn gì."""
 
@@ -91,4 +119,37 @@ class Critic(Middleware):
         #     claims = [], citations = [], và viết lại "answer" nói rõ là
         #     không đủ căn cứ.
         #  6. Cập nhật report["citations"] cho khớp với claims còn lại.
-        return report  # <- mặc định KHÔNG LÀM GÌ: agent vẫn chạy được
+        claims = report.get("claims")
+        if not isinstance(claims, list) or not claims:
+            return report
+
+        kept = []
+        split_any = False
+        for claim in claims:
+            text = claim.get("text") if isinstance(claim, dict) else None
+            if not isinstance(text, str):
+                continue
+            if ctx.saw(text):
+                kept.append(claim)
+                continue
+            halves = _split_stitched(ctx, text)
+            if halves is None:
+                continue  # bịa: bỏ claim
+            for half_text, half_doc_id in halves:
+                kept.append({"text": half_text, "doc_id": half_doc_id})
+            split_any = True
+
+        if not kept:
+            report["abstain"] = True
+            report["claims"] = []
+            report["citations"] = []
+            report["answer"] = "Không đủ căn cứ trong tài liệu đã đọc để trả lời câu hỏi này."
+            return report
+
+        if split_any:
+            report["abstain"] = True
+        report["claims"] = kept
+        report["citations"] = sorted(
+            {c["doc_id"] for c in kept if isinstance(c.get("doc_id"), str)}
+        )
+        return report

@@ -62,6 +62,13 @@ from __future__ import annotations
 from harness.middleware import Middleware
 
 
+def _quotes_a_line(text: str, body: str) -> bool:
+    """`text` là trích dẫn nguyên văn của một PHẦN (hoặc toàn bộ) một DÒNG
+    trong `body`? Cắt bớt hai đầu là hợp lệ, nên đây là kiểm tra substring
+    trong từng dòng, không phải so khớp cả dòng."""
+    return any(text in line for line in body.split("\n"))
+
+
 class CitationChecker(Middleware):
     """Trỏ mỗi claim về đúng tài liệu thật sự chứa câu đó."""
 
@@ -80,4 +87,36 @@ class CitationChecker(Middleware):
         #     Đổi doc_id sang nó, GIỮ NGUYÊN text.
         #  4. Không tìm được nguồn nào -> để `critic` xử lý, đừng bịa doc_id.
         #  5. Cập nhật report["citations"] = danh sách doc_id đã sắp xếp.
-        return report  # <- mặc định KHÔNG LÀM GÌ: agent vẫn chạy được
+        claims = report.get("claims")
+        if not isinstance(claims, list) or not claims or ctx.corpus is None:
+            return report
+
+        for claim in claims:
+            if not isinstance(claim, dict):
+                continue
+            text = claim.get("text")
+            if not isinstance(text, str):
+                continue
+
+            doc = ctx.corpus.get(claim.get("doc_id"))
+            if (
+                doc is not None
+                and doc.body in ctx.observed_text
+                and _quotes_a_line(text, doc.body)
+            ):
+                continue  # trích dẫn đã đúng, VÀ tài liệu này thật sự đã được đọc
+
+            for candidate in ctx.corpus.docs:
+                if candidate.body in ctx.observed_text and _quotes_a_line(text, candidate.body):
+                    claim["doc_id"] = candidate.doc_id
+                    break
+            # Không tìm được nguồn -> để nguyên doc_id cũ, `critic` sẽ xử lý.
+
+        report["citations"] = sorted(
+            {
+                c["doc_id"]
+                for c in claims
+                if isinstance(c, dict) and isinstance(c.get("doc_id"), str)
+            }
+        )
+        return report
